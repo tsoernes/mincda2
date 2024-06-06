@@ -43,15 +43,14 @@ class Strat:
         n_rejected = 0
         # Get the first call event and a responding action to handle it
         event = heappop(self.events)
-        ch = self.get_action(event)
+        action_ch = self.get_action(event)
 
         # Discrete event simulation. Step through 'n_events' call events
         # and use the agent to act on each of them.
         for _event_i in range(self.n_events):
 
             # Execute the given action (i.e. 'ch') for the given event on the grid.
-            t, cell = event.time, event.cell
-            self.execute_action(event, ch)
+            self.execute_action(event, action_ch)
 
             # Check that the agent does not violate the reuse constraint.
             if self.sanity_check and not self.grid.validate_reuse_constr():
@@ -65,23 +64,24 @@ class Strat:
                     n_incoming += 1
                     # Generate next incoming call
                     heappush(self.events, self.eventgen.arrival_event(t, cell))
-                    if ch is None:
+                    if action_ch is None:
                         # No channel was available for assignment.
                         n_rejected += 1
                         self.logger.debug(f"Rejected call to {cell}")
                     else:
                         # Call accepted.
                         # Generate call duration for call and add END event
-                        end_event = self.eventgen.termination_event(t, cell, ch)
+                        end_event = self.eventgen.termination_event(t, cell, action_ch)
                         heappush(self.events, end_event)
-                case TerminationEvent(t, cell, ch):
+                case TerminationEvent(t, cell, _):
+                    # TODO
                     pass
 
             # Prepare fo next simulation step.
             # Get the next event to handle,  and the corresponding action to handle it.
-            event = heappop(self.events)
-            next_ch = self.get_action( event)
-            ch, event = next_ch,  event
+            next_event = heappop(self.events)
+            next_action_ch = self.get_action(next_event)
+            action_ch, event = next_action_ch, next_event
         self.logger.info(f"Rejected {n_rejected} of {n_incoming} calls")
 
     def get_action(self, event, *_args, **_kwargs) -> int | None:
