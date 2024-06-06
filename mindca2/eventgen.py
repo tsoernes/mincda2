@@ -21,7 +21,7 @@ class EventGen:
 
         """
         dt = np.random.exponential(self.call_intertimes)
-        return ArrivalEvent(dt + t, cell)
+        return ArrivalEvent(t + dt, cell)
 
     def termination_event(self, t: float, cell: Cell, ch: int) -> TerminationEvent:
         """
