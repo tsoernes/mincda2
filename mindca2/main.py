@@ -20,7 +20,7 @@ def get_args(defaults=False) -> dict:
         default=1,
     )
     parser.add_argument(
-        "--call_rate", type=int, help="in calls per minute", default=200
+        "--call_rate", type=float, help="in calls per minute", default=200 / 60
     )
     parser.add_argument(
         "-phoff",
@@ -36,14 +36,14 @@ def get_args(defaults=False) -> dict:
         dest="n_events",
         type=int,
         help="number of events to simulate",
-        default=100_000,
+        default=10_000,
     )
     parser.add_argument(
         "--log_iter",
         dest="log_iter",
         type=int,
         help="Show blocking probability every 'log__iter' iterations",
-        default=10_000,
+        default=1_000,
     )
     parser.add_argument(
         "--alpha", type=float, help="Learning rate for neural network", default=2.52e-6
