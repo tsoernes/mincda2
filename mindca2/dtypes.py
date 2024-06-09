@@ -35,7 +35,7 @@ ArrivalEvent = namedtuple("ArrivalEvent", ["time", "cell"])
 
 TerminationEvent = namedtuple("TerminationEvent", ["time", "cell", "ch"])
 
-Event = ArrivalEvent | TerminationEvent
+type Event = ArrivalEvent | TerminationEvent
 
 event1 = ArrivalEvent(0.0, Cell(1,3))
 event2 = TerminationEvent(0.2, Cell(1,4), 2)
