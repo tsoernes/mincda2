@@ -202,6 +202,15 @@ class Grid:
 
 
 class FixedGrid(Grid):
+    """
+    A grid where each cell has a fixed set of channels that it can allocate
+    calls on.
+
+    Assigns the channels to cells such that they will not interfere with each
+    other within a channel reuse constraint of 3.
+    The channels assigned to a cell are its nominal channels.
+    """
+
     def __init__(self, n_nom_channels: int = 0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # A label for each cell. Each cell with the same label will share
