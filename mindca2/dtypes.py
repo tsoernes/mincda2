@@ -1,4 +1,8 @@
 from typing import NamedTuple
+import numpy as np
+
+type IntLike = int | np.int_ | np.int64
+
 
 class Cell(NamedTuple):
     row: int
