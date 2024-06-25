@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 import argparse
 import logging
-from strats import FAStrat
+from strats import FAStrat, RS_SARSA
 from grid import Grid, FixedGrid
 from eventgen import EventGen
 
@@ -12,6 +12,9 @@ def get_args(defaults=False) -> dict:
     """
     parser = argparse.ArgumentParser()
 
+    strats = {"fca": FAStrat, "rs_sarsa": RS_SARSA}
+    parser.add_argument("strat", type=str, choices=strats.keys(), default="rs_sarsa")
+
     parser.add_argument("--call_duration", type=int, help="in minutes", default=3)
     parser.add_argument(
         "--hoff_call_duration",
@@ -19,9 +22,14 @@ def get_args(defaults=False) -> dict:
         help="handoff call duration, in minutes",
         default=1,
     )
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
         "--call_rate", type=float, help="in calls per minute", default=200 / 60
     )
+    group.add_argument(
+        "--call_rateh", type=float, help="in calls per hour"
+    )
+
     parser.add_argument(
         "-phoff",
         "--p_handoff",
@@ -46,17 +54,41 @@ def get_args(defaults=False) -> dict:
         default=1_000,
     )
     parser.add_argument(
-        "--alpha", type=float, help="Learning rate for neural network", default=2.52e-6
+        "--alpha", type=float, help="Learning rate for RL", default=0.05
     )
     parser.add_argument(
-        "--alpha_avg", type=float, help="Learning rate for average reward", default=0.06
-    )
-    parser.add_argument(
-        "--alpha_grad",
+        '--alpha_decay',
         type=float,
-        help="Learning rate for TDC gradient corrections",
-        default=5e-6,
-    )
+        help="(RL/Table) factor by which alpha is multiplied each iteration",
+        default=0.999_999_9)
+    # parser.add_argument(
+    #     "--alpha_avg", type=float, help="Learning rate for average reward", default=0.06
+    # )
+    # parser.add_argument(
+    #     "--alpha_grad",
+    #     type=float,
+    #     help="Learning rate for TDC gradient corrections",
+    #     default=5e-6,
+    # )
+    parser.add_argument('--gamma', type=float, help="(RL) discount factor", default=0.975)
+    parser.add_argument(
+        '--epsilon',
+        '-eps',
+        dest='epsilon',
+        type=float,
+        help="(RL) exploration hyperparameter",
+        default=5)
+    parser.add_argument(
+        '-edec',
+        '--epsilon_decay',
+        type=float,
+        help="(RL) factor by which epsilon is multiplied each iteration",
+        default=0.999_995)
+    parser.add_argument(
+        '--eps_log_decay',
+        type=int,
+        help="(RL) Decay epsilon a la Lilith instead of exponentially (give s parameter)",
+        default=256)
 
     parser.add_argument("--rows", type=int, help="number of rows in grid", default=7)
     parser.add_argument("--cols", type=int, help="number of columns in grid", default=7)
@@ -69,32 +101,54 @@ def get_args(defaults=False) -> dict:
         help="10: Debug,\n20: Info,\n30: Warning",
         default=20,
     )
+    parser.add_argument(
+        "--no_sanity_check",
+        action="store_true",
+        default=False,
+    )
+    # Lilith preset
+    # if pp['lilith'] or pp['lilith_noexp']:
+    #     pp['alpha'] = 0.05
+    #     pp['alpha_decay'] = 1
+    #     pp['target'] = 'discount'
+    #     pp['gamma'] = 0.975
+    # if pp['lilith']:
+    #     pp['eps_log_decay'] = 256
+    #     pp['epsilon'] = 5
 
     if defaults:
-        args = vars(parser.parse_args([]))
+        args = vars(parser.parse_args(["rs_sarsa"]))
     else:
         args = vars(parser.parse_args())
+
+    # Convert e.g. {"no_sanity_check": True} to {"sanity_check": False}
+    for arg, val in args.copy().items():
+        if arg.startswith("no_"):
+            args[arg[3:]] = not val
+            del args[arg]
+
+    args["strat"] = strats[args["strat"]]
+
+    if args["call_rateh"]:
+        args["call_rate"] = args["call_rateh"] / 60
     return args
 
 
-def main(is_main=False):
+def main(defaults=False):
     # Get problem parameters
-    pp = get_args(defaults=is_main)
+    pp = get_args(defaults=defaults)
 
     # Initialize a logger
     logging.basicConfig(level=pp["log_level"], format="%(message)s")
     logger = logging.getLogger("")
     logger.info(f"Starting simulation with params {pp}")
 
-    # Initialize a caller environment grid
-    grid = FixedGrid(logger=logger, **pp)
-
     # Initializse a event generator
     eventgen = EventGen(**pp)
 
     # Initialize an agent (i.e. a strategy) for allocation channels
-    strat = FAStrat(
-        pp, grid=grid, eventgen=eventgen, sanity_check=True, logger=logger
+    strat = pp["strat"](
+        pp, eventgen=eventgen, sanity_check=True, logger=logger
     )
 
     # Start simulation
@@ -102,4 +156,4 @@ def main(is_main=False):
 
 
 if __name__ == "__main__":
-    main(is_main=True)
+    main(defaults=False)
