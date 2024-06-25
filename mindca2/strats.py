@@ -1,8 +1,12 @@
-from dtypes import Cell, ArrivalEvent, TerminationEvent, Event
+from dtypes import Cell, ArrivalEvent, TerminationEvent, Event, IntLike
+from typing import Type
+import numpy.typing as npt
 import numpy as np
 from exploration_policies import Greedy, Boltzmann
 from abc import ABC, abstractmethod
-from grid import Grid
+from grid import Grid, FixedGrid, GridArr
+from logging import Logger
+from eventgen import EventGen
 
 
 from heapq import heappush, heappop
@@ -14,8 +18,15 @@ class Strat(ABC):
     call events, that is, to assign channels on incoming calls and
     possible reassigning channels on terminating calls.
     """
+    grid: Grid
 
-    def __init__(self, pp, eventgen, grid, logger, sanity_check: bool = True):
+    def __init__(
+        self,
+        pp: dict,
+        eventgen: EventGen,
+        logger: Logger,
+        sanity_check: bool = True,
+    ):
         """
         :param sanity_check: Whether or not to verify that the channel reuse constraint
             is not broken each iteration of the simulation
@@ -24,7 +35,6 @@ class Strat(ABC):
         self.cols = pp["cols"]
         self.n_channels = pp["n_channels"]
         self.n_events = pp["n_events"]
-        self.grid = grid
         # A heap queue of sorted (time, call_event) pairs.
         # The queue is sorted such that the call events with the lowest event
         # time is popped first.
@@ -51,20 +61,18 @@ class Strat(ABC):
         n_rejected = 0
         # Get the first call event and a responding action to handle it
         event = heappop(self.events)
-        action_ch = self.get_action(event)
+        action_ch = self.get_initial_action(event)
 
         # Discrete event simulation. Step through 'n_events' call events
         # and use the agent to act on each of them.
         for _event_i in range(self.n_events):
+            gridarr = np.copy(self.grid.state)  # Copy before state is modified
             # Execute the given action (i.e. 'ch') for the given event on the grid.
             self.execute_action(event, action_ch)
 
-            # Check that the agent does not violate the reuse constraint.
-            if self.sanity_check and not self.grid.validate_reuse_constr():
-                # If this happens, the agent has performed an illegal action.
-                # This should never happend and indicated a bug in the agent.
-                self.logger.error(f"Reuse constraint broken: {self.grid}")
-                raise Exception
+            if self.sanity_check:
+                # Check that the agent does not violate the reuse constraint.
+                self.grid.validate_reuse_constr()
 
             # Generate the next event(s) and log some stats
             match event:
@@ -88,9 +96,18 @@ class Strat(ABC):
             # Prepare fo next simulation step.
             # Get the next event to handle,  and the corresponding action to handle it.
             next_event = heappop(self.events)
-            next_action_ch = self.get_action(next_event)
+            next_action_ch = self.get_action(
+                next_event,
+                gridarr,
+                cell,
+                action_ch,
+                type(event),
+            )
+
             action_ch, event = next_action_ch, next_event
-        self.logger.info(f"Rejected {n_rejected} of {n_incoming} calls")
+        self.logger.info(
+            f"Rejected {n_rejected} of {n_incoming} ({n_rejected/n_incoming}%) calls"
+        )
 
     @abstractmethod
     def get_action(self, event: Event, *_args, **_kwargs) -> int | None:
@@ -106,12 +123,20 @@ class Strat(ABC):
         """
         raise NotImplementedError()
 
-    @abstractmethod
-    def execute_action(self, *_args, **_kwrags) -> None:
+    get_initial_action=get_action
+
+    def execute_action(self, event: Event, ch: int | None) -> None:
         """
-        Change which channels are marked is free or in use on the grid
+        Given an event and an action (i.e. 'ch'), execute the action on the grid.
+        This amounts to marking a channel in use on arrival events and
+        marking a channel as free on termination events.
         """
-        raise NotImplementedError()
+        if ch is not None:
+            match event:
+                case ArrivalEvent(t, cell):
+                    self.grid.state[cell][ch] = 1
+                case TerminationEvent(t, cell, _):
+                    self.grid.state[cell][ch] = 0
 
 
 class FAStrat(Strat):
@@ -122,10 +147,17 @@ class FAStrat(Strat):
     to them simultaneously without interference.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, pp,  *args, **kwargs):
+        self.grid = FixedGrid(**pp)
+        super().__init__(pp, *args, **kwargs)
 
     def get_action(self, event: Event, *args) -> int | None:
+        """
+        On arrival events, the first unused nominal channel is selected.
+
+        No reassignment is done on termination events; thus the channel
+        of the call is selected for termination.
+        """
         match event:
             case ArrivalEvent(t, cell):
                 # When a call arrives in a cell,
@@ -141,71 +173,142 @@ class FAStrat(Strat):
                 # No rearrangement is done when a call terminates.
                 return ch
 
-    def execute_action(self, event: Event, ch: int | None) -> None:
-        if ch is not None:
-            match event:
-                case ArrivalEvent(t, cell):
-                    self.grid.state[cell][ch] = 1
-                case TerminationEvent(t, cell, _):
-                    self.grid.state[cell][ch] = 0
-
+    get_initial_action = get_action
 
 class RLStrat(Strat):
-    def __init__(self, pp, *args, **kwargs):
+    def __init__(self, pp: dict, *args, **kwargs):
+        self.grid = Grid(**pp)
         super().__init__(pp, *args, **kwargs)
-        self.epsilon = self.epsilon0 = pp["epsilon"]
-        self.exploration_policy = Greedy
-        self.eps_log_decay = self.pp["eps_log_decay"]
-
-        self.epsilon_decay = pp["epsilon_decay"]
+        self.exploration_policy = Greedy()
         self.losses = [0]
+        self.gamma = pp['gamma']  # discount factor
 
+    # def get_init_action(self, event: Event) -> int:
+    #     ch, _idx = self.optimal_ch(ce_type=event.event_type, cell=event.cell)
+    #     return ch
     def get_init_action(self, event: Event) -> int:
-        ch, _idx = self.optimal_ch(ce_type=event.event_type, cell=event.cell)
+        ch, _idx = self.optimal_ch(event)
+        assert ch is not None
         return ch
 
-    def get_action(self, next_cevent, grid, cell, ch, reward, ce_type, discount) -> int:
-        next_ce_type, next_cell = next_cevent[1:3]
-        # Choose A' from S'
-        next_ch, next_max_ch = self.optimal_ch(next_ce_type, next_cell)
-        # If there's no action to take, or no action was taken,
-        # don't update q-value at all
-        if ce_type != CEvent.END and ch is not None and next_ch is not None:
-            assert next_max_ch is not None
-            # Observe reward from previous action, and
-            # update q-values with one-step look-ahead
-            self.update_qval(
-                grid, cell, ch, reward, next_cell, next_ch, next_max_ch, discount
-            )
+    # def get_action(self, next_cevent, grid, cell, ch, reward, ce_type, discount) -> int:
+    #     next_ce_type, next_cell = next_cevent[1:3]
+    #     # Choose A' from S'
+    #     next_ch, next_max_ch = self.optimal_ch(next_ce_type, next_cell)
+    #     # If there's no action to take, or no action was taken,
+    #     # don't update q-value at all
+    #     if ce_type != CEvent.END and ch is not None and next_ch is not None:
+    #         assert next_max_ch is not None
+    #         # Observe reward from previous action, and
+    #         # update q-values with one-step look-ahead
+    #         self.update_qval(
+    #             grid, cell, ch, reward, next_cell, next_ch, next_max_ch, discount
+    #         )
+    #     return next_ch
+
+    def get_initial_action(
+        self,
+        event: Event,
+    ) -> int | None:
+        """
+        Return a channel to be assigned in response to 'cevent'.
+        """
+        # Choose A from S
+        next_ch, next_max_ch = self.optimal_ch(event)
         return next_ch
 
-    def get_action2(
+    def get_action(
         self,
         next_event: Event,
-        grid: Grid,
+        gridarr: GridArr,
         cell: Cell,
         ch: int | None,
-        reward: int,
-        discount: float,
-    ) -> int:
+        event_type: Type[Event]
+    ) -> int | None:
+        """Return a channel to be (re)assigned in response to 'next_cevent'.
+
+        'cell', 'ch' and specify the action that  executed on
+        'grid' in response to an event of type 'event_type'.
+        """
         # Choose A' from S'
         next_ch, next_max_ch = self.optimal_ch(next_event)
         # If there's no action to take, or no action was taken,
         # don't update q-value at all
         if (
-            not isinstance(next_event, TerminationEvent)
+            event_type is not TerminationEvent
             and ch is not None
             and next_ch is not None
         ):
             assert next_max_ch is not None
             # Observe reward from previous action, and
             # update q-values with one-step look-ahead
-            self.update_qval(
-                grid, cell, ch, reward, next_event.cell, next_ch, next_max_ch, discount
-            )
+            self.update_qval(gridarr, cell, ch, next_event.cell, next_ch)
         return next_ch
 
-    def optimal_ch(self, ce_type, cell) -> tuple[int, float]:
+    @abstractmethod
+    def update_qval(
+        self, gridarr:GridArr, cell: Cell, ch: int, next_cell: Cell, next_ch: int
+    ):
+        raise NotImplementedError()
+    # def optimal_ch(self, ce_type, cell) -> tuple[int, float]:
+    #     """
+    #     Select the channel fitting for assignment that
+    #     that has the maximum q-value according to an exploration policy,
+    #     or select the channel for termination that has the minimum
+    #     q-value in a greedy fashion.
+
+    #     Return (ch, max_ch) where 'ch' is the selected channel according to
+    #     exploration policy and max_ch' is the greedy (still eligible) channel.
+    #     'ch' (and 'max_ch') is None if no channel is eligible for assignment.
+    #     """
+    #     # Channels in use at cell
+    #     inuse = np.nonzero(self.grid[cell])[0]
+    #     n_used = len(inuse)
+
+    #     if ce_type == CEvent.NEW or ce_type == CEvent.HOFF:
+    #         chs = NGF.get_eligible_chs(self.grid, cell)
+    #         if len(chs) == 0:
+    #             # No channels available for assignment,
+    #             return (None, None, 0)
+    #     else:
+    #         # Channels in use at cell, including channel scheduled
+    #         # for termination. The latter is included because it might
+    #         # be the least valueable channel, in which case no
+    #         # reassignment is done on call termination.
+    #         chs = inuse
+    #         # or no channels in use to reassign
+    #         assert n_used > 0
+
+    #     # TODO If 'max_ch' turns out not to be useful, then don't return it and
+    #     # avoid running a forward pass through the net if a random action is selected.
+    #     qvals_dense = self.get_qvals(cell=cell, n_used=n_used, ce_type=ce_type, chs=chs)
+    #     # Selecting a ch for reassigment is always greedy because no learning
+    #     # is done on the reassignment actions.
+    #     if ce_type == CEvent.END:
+    #         amin_idx = np.argmin(qvals_dense)
+    #         ch = max_ch = chs[amin_idx]
+    #         p = 1
+    #     else:
+    #         ch, idx, p = self.exploration_policy.select_action(
+    #             self.epsilon, chs, qvals_dense, cell
+    #         )
+    #         if self.eps_log_decay:
+    #             self.epsilon = self.epsilon0 / np.sqrt(self.t * 60 / self.eps_log_decay)
+    #         else:
+    #             self.epsilon *= self.epsilon_decay
+    #         amax_idx = np.argmax(qvals_dense)
+    #         max_ch = chs[amax_idx]
+
+    #     # If qvals blow up ('NaN's and 'inf's), ch becomes none.
+    #     if ch is None:
+    #         self.logger.error(f"ch is none for {ce_type}\n{chs}\n{qvals_dense}\n")
+    #         raise Exception
+    #     self.logger.debug(
+    #         f"Optimal ch: {ch} for event {ce_type} of possibilities {chs}"
+    #     )
+    #     return (ch, max_ch, p)
+
+    def optimal_ch(self, event: Event) -> tuple[int, int] | tuple[None, None]:
         """
         Select the channel fitting for assignment that
         that has the maximum q-value according to an exploration policy,
@@ -216,155 +319,93 @@ class RLStrat(Strat):
         exploration policy and max_ch' is the greedy (still eligible) channel.
         'ch' (and 'max_ch') is None if no channel is eligible for assignment.
         """
-        # Channels in use at cell
-        inuse = np.nonzero(self.grid[cell])[0]
-        n_used = len(inuse)
-
-        if ce_type == CEvent.NEW or ce_type == CEvent.HOFF:
-            chs = NGF.get_eligible_chs(self.grid, cell)
-            if len(chs) == 0:
-                # No channels available for assignment,
-                return (None, None, 0)
-        else:
-            # Channels in use at cell, including channel scheduled
-            # for termination. The latter is included because it might
-            # be the least valueable channel, in which case no
-            # reassignment is done on call termination.
-            chs = inuse
-            # or no channels in use to reassign
-            assert n_used > 0
-
-        # TODO If 'max_ch' turns out not to be useful, then don't return it and
-        # avoid running a forward pass through the net if a random action is selected.
-        qvals_dense = self.get_qvals(cell=cell, n_used=n_used, ce_type=ce_type, chs=chs)
-        # Selecting a ch for reassigment is always greedy because no learning
-        # is done on the reassignment actions.
-        if ce_type == CEvent.END:
-            amin_idx = np.argmin(qvals_dense)
-            ch = max_ch = chs[amin_idx]
-            p = 1
-        else:
-            ch, idx, p = self.exploration_policy.select_action(
-                self.epsilon, chs, qvals_dense, cell
-            )
-            if self.eps_log_decay:
-                self.epsilon = self.epsilon0 / np.sqrt(self.t * 60 / self.eps_log_decay)
-            else:
-                self.epsilon *= self.epsilon_decay
-            amax_idx = np.argmax(qvals_dense)
-            max_ch = chs[amax_idx]
-
-        # If qvals blow up ('NaN's and 'inf's), ch becomes none.
-        if ch is None:
-            self.logger.error(f"ch is none for {ce_type}\n{chs}\n{qvals_dense}\n")
-            raise Exception
-        self.logger.debug(
-            f"Optimal ch: {ch} for event {ce_type} of possibilities {chs}"
-        )
-        return (ch, max_ch, p)
-
-    def optimal_ch2(self, event: Event, cell: Cell) -> tuple[int, float]:
-        """
-        Select the channel fitting for assignment that
-        that has the maximum q-value according to an exploration policy,
-        or select the channel for termination that has the minimum
-        q-value in a greedy fashion.
-
-        Return (ch, max_ch) where 'ch' is the selected channel according to
-        exploration policy and max_ch' is the greedy (still eligible) channel.
-        'ch' (and 'max_ch') is None if no channel is eligible for assignment.
-        """
-        # Channels in use at cell
-        inuse = np.nonzero(self.grid[cell])[0]
+        # (Number of) Channels in use at event cell
+        inuse = np.nonzero(self.grid.state[event.cell])[0]
         n_used = len(inuse)
 
         # Should also include HOFF in the first branch if implemented
         if isinstance(event, ArrivalEvent):
-            chs = NGF.get_eligible_chs(self.grid, cell)
+            chs = self.grid.get_eligible_chs(event.cell)
             if len(chs) == 0:
                 # No channels available for assignment,
-                return (None, None, 0)
+                return None, None
         else:
             # Channels in use at cell, including channel scheduled
             # for termination. The latter is included because it might
             # be the least valueable channel, in which case no
             # reassignment is done on call termination.
             chs = inuse
-            # or no channels in use to reassign
             assert n_used > 0
 
-        # TODO If 'max_ch' turns out not to be useful, then don't return it and
-        # avoid running a forward pass through the net if a random action is selected.
-        qvals_dense = self.get_qvals(cell=cell, n_used=n_used, ce_type=ce_type, chs=chs)
-        # Selecting a ch for reassigment is always greedy because no learning
-        # is done on the reassignment actions.
-        if ce_type == CEvent.END:
+        qvals_dense = self.get_qvals(cell=event.cell, n_used=n_used, chs=chs)
+        if isinstance(event, TerminationEvent):
+            # Selecting a ch for reassigment is always greedy because no learning
+            # is done on the reassignment actions.
+            # Select minimum-valued channel
             amin_idx = np.argmin(qvals_dense)
             ch = max_ch = chs[amin_idx]
-            p = 1
         else:
-            ch, idx, p = self.exploration_policy.select_action(
-                self.epsilon, chs, qvals_dense, cell
+            ch, idx = self.exploration_policy.select_action(
+                chs=chs, qvals=qvals_dense, time=event.time
             )
-            if self.eps_log_decay:
-                self.epsilon = self.epsilon0 / np.sqrt(self.t * 60 / self.eps_log_decay)
-            else:
-                self.epsilon *= self.epsilon_decay
             amax_idx = np.argmax(qvals_dense)
             max_ch = chs[amax_idx]
 
         # If qvals blow up ('NaN's and 'inf's), ch becomes none.
         if ch is None:
-            self.logger.error(f"ch is none for {ce_type}\n{chs}\n{qvals_dense}\n")
+            self.logger.error(f"ch is none for {event}\n{chs}\n{qvals_dense}\n")
             raise Exception
-        self.logger.debug(
-            f"Optimal ch: {ch} for event {ce_type} of possibilities {chs}"
-        )
-        return (ch, max_ch, p)
+        self.logger.debug(f"Optimal ch: {ch} for event {event} of possibilities {chs}")
+        return (ch, max_ch)
+
+    @abstractmethod
+    def get_qvals(
+        self,
+        cell: Cell,
+        n_used: int,
+        chs: IntLike | npt.NDArray[np.int_],
+        *args,
+        **kwargs,
+    ):
+        raise NotImplementedError()
 
 
 class QTable(RLStrat):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.alpha = self.pp["alpha"]
-        self.alpha_decay = self.pp["alpha_decay"]
-        self.lmbda = self.pp["lambda"]
-        if self.lmbda is not None:
-            self.logger.error("Using lambda returns")
-        if self.pp["target"] != "discount":
-            raise NotImplementedError(self.pp["target"])
-        self.eps_log_decay = self.pp["eps_log_decay"]
+    def __init__(self, pp, *args, **kwargs):
+        super().__init__(pp, *args, **kwargs)
+        # Learning rate for RL algorithm
+        self.alpha = pp["alpha"]
+        self.alpha_decay = pp["alpha_decay"]
+        self.exploration_policy = Boltzmann(
+            epsilon=pp["epsilon"], epsilon_decay=pp["epsilon_decay"]
+        )
+        self.qvals = np.zeros(self.grid.state.shape)
 
-    def get_qvals(self, cell, n_used, chs=None, *args, **kwargs):
-        rep = self.feature_rep(cell, n_used)
-        if chs is None:
-            return self.qvals[rep]
-        else:
-            return self.qvals[rep][chs]
+    @abstractmethod
+    def feature_rep(self, cell: Cell, *args, **kwargs):
+        raise NotImplementedError()
+
+    def get_qvals(self, cell, n_used, chs, *args, **kwargs):
+        frep = self.feature_rep(cell, n_used)
+        return self.qvals[frep][chs]
 
     def update_qval(
-        self, grid, cell, ch, reward, next_cell, next_ch, next_max_ch, discount
+        self, gridarr:GridArr, cell: Cell, ch: int, next_cell: Cell, next_ch: int
     ):
         assert type(ch) == np.int64
         assert ch is not None
-        if self.pp["verify_grid"]:
-            assert np.sum(grid != self.grid) == 1
-        next_n_used = np.count_nonzero(self.grid[next_cell])
+        if self.sanity_check:
+            assert np.sum(gridarr != self.grid.state) == 1
+        next_n_used = np.count_nonzero(self.grid.state[next_cell])
         next_qval = self.get_qvals(next_cell, next_n_used, next_ch)
-        target_q = reward + discount * next_qval
-        # Counting n_used of self.grid instead of grid yields significantly lower
-        # blockprob on (TT-)SARSA for unknown reasons.
-        n_used = np.count_nonzero(grid[cell])
-        q = self.get_qvals(cell, n_used, ch)
+        reward = self.grid.state.sum()
+        target_q = reward + self.gamma * next_qval
+        n_used = np.count_nonzero(gridarr[cell])
+        q = self.get_qvals(cell=cell, n_used=n_used, chs=ch)
         td_err = target_q - q
         self.losses.append(td_err**2)
         frep = self.feature_rep(cell, n_used)
-        if self.lmbda is None:
-            self.qvals[frep][ch] += self.alpha * td_err
-        else:
-            self.el_traces[frep][ch] += 1
-            self.qvals += self.alpha * td_err * self.el_traces
-            self.el_traces *= discount * self.lmbda
+        self.qvals[frep][ch] += self.alpha * td_err
         self.alpha *= self.alpha_decay
         next_frep = self.feature_rep(next_cell, next_n_used)
         self.logger.debug(
@@ -380,41 +421,6 @@ class RS_SARSA(QTable):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.qvals = np.zeros(self.dims)
 
-    def feature_rep(self, cell, n_used):
+    def feature_rep(self, cell: Cell, *args, **kwargs):
         return cell
-
-
-class RS_SARSA_Strat(Strat):
-    """
-    RS-SARSA
-    Reduced State SARSA Q-Learning
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def get_action(self, event, *args) -> int | None:
-        match event:
-            case ArrivalEvent(t, cell):
-                # When a call arrives in a cell,
-                # if any pre-assigned channel is unused;
-                # it is assigned, else the call is blocked.
-                ch = None
-                for idx, isNom in enumerate(self.grid.nom_chs[cell]):
-                    if isNom and self.grid.state[cell][idx] == 0:
-                        ch = idx
-                        break
-                return ch
-            case TerminationEvent(t, cell, ch):
-                # No rearrangement is done when a call terminates.
-                return ch
-
-    def execute_action(self, event, ch) -> None:
-        if ch is not None:
-            match event:
-                case ArrivalEvent(t, cell):
-                    self.grid.state[cell][ch] = 1
-                case TerminationEvent(t, cell, _):
-                    self.grid.state[cell][ch] = 0
