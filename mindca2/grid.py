@@ -171,7 +171,8 @@ class Grid:
         """
         Get a mask/bitmap of eligible channels at the given cell
 
-        A channel is True is it is use
+        A channel is True is it is eligible, i.e. it can be used
+        without causing interferens.
         """
         r, c = cell
         # Find eligible chs by bitwise ORing the allocation maps of neighbors

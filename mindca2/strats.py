@@ -106,7 +106,7 @@ class Strat(ABC):
 
             action_ch, event = next_action_ch, next_event
         self.logger.info(
-            f"Rejected {n_rejected} of {n_incoming} ({n_rejected/n_incoming}%) calls"
+            f"Rejected {n_rejected} of {n_incoming} ({n_rejected*100/n_incoming:.2f}%) calls"
         )
 
     @abstractmethod
@@ -183,29 +183,6 @@ class RLStrat(Strat):
         self.losses = [0]
         self.gamma = pp['gamma']  # discount factor
 
-    # def get_init_action(self, event: Event) -> int:
-    #     ch, _idx = self.optimal_ch(ce_type=event.event_type, cell=event.cell)
-    #     return ch
-    def get_init_action(self, event: Event) -> int:
-        ch, _idx = self.optimal_ch(event)
-        assert ch is not None
-        return ch
-
-    # def get_action(self, next_cevent, grid, cell, ch, reward, ce_type, discount) -> int:
-    #     next_ce_type, next_cell = next_cevent[1:3]
-    #     # Choose A' from S'
-    #     next_ch, next_max_ch = self.optimal_ch(next_ce_type, next_cell)
-    #     # If there's no action to take, or no action was taken,
-    #     # don't update q-value at all
-    #     if ce_type != CEvent.END and ch is not None and next_ch is not None:
-    #         assert next_max_ch is not None
-    #         # Observe reward from previous action, and
-    #         # update q-values with one-step look-ahead
-    #         self.update_qval(
-    #             grid, cell, ch, reward, next_cell, next_ch, next_max_ch, discount
-    #         )
-    #     return next_ch
-
     def get_initial_action(
         self,
         event: Event,
@@ -250,63 +227,6 @@ class RLStrat(Strat):
         self, gridarr:GridArr, cell: Cell, ch: int, next_cell: Cell, next_ch: int
     ):
         raise NotImplementedError()
-    # def optimal_ch(self, ce_type, cell) -> tuple[int, float]:
-    #     """
-    #     Select the channel fitting for assignment that
-    #     that has the maximum q-value according to an exploration policy,
-    #     or select the channel for termination that has the minimum
-    #     q-value in a greedy fashion.
-
-    #     Return (ch, max_ch) where 'ch' is the selected channel according to
-    #     exploration policy and max_ch' is the greedy (still eligible) channel.
-    #     'ch' (and 'max_ch') is None if no channel is eligible for assignment.
-    #     """
-    #     # Channels in use at cell
-    #     inuse = np.nonzero(self.grid[cell])[0]
-    #     n_used = len(inuse)
-
-    #     if ce_type == CEvent.NEW or ce_type == CEvent.HOFF:
-    #         chs = NGF.get_eligible_chs(self.grid, cell)
-    #         if len(chs) == 0:
-    #             # No channels available for assignment,
-    #             return (None, None, 0)
-    #     else:
-    #         # Channels in use at cell, including channel scheduled
-    #         # for termination. The latter is included because it might
-    #         # be the least valueable channel, in which case no
-    #         # reassignment is done on call termination.
-    #         chs = inuse
-    #         # or no channels in use to reassign
-    #         assert n_used > 0
-
-    #     # TODO If 'max_ch' turns out not to be useful, then don't return it and
-    #     # avoid running a forward pass through the net if a random action is selected.
-    #     qvals_dense = self.get_qvals(cell=cell, n_used=n_used, ce_type=ce_type, chs=chs)
-    #     # Selecting a ch for reassigment is always greedy because no learning
-    #     # is done on the reassignment actions.
-    #     if ce_type == CEvent.END:
-    #         amin_idx = np.argmin(qvals_dense)
-    #         ch = max_ch = chs[amin_idx]
-    #         p = 1
-    #     else:
-    #         ch, idx, p = self.exploration_policy.select_action(
-    #             self.epsilon, chs, qvals_dense, cell
-    #         )
-    #         if self.eps_log_decay:
-    #             self.epsilon = self.epsilon0 / np.sqrt(self.t * 60 / self.eps_log_decay)
-    #         else:
-    #             self.epsilon *= self.epsilon_decay
-    #         amax_idx = np.argmax(qvals_dense)
-    #         max_ch = chs[amax_idx]
-
-    #     # If qvals blow up ('NaN's and 'inf's), ch becomes none.
-    #     if ch is None:
-    #         self.logger.error(f"ch is none for {ce_type}\n{chs}\n{qvals_dense}\n")
-    #         raise Exception
-    #     self.logger.debug(
-    #         f"Optimal ch: {ch} for event {ce_type} of possibilities {chs}"
-    #     )
-    #     return (ch, max_ch, p)
 
     def optimal_ch(self, event: Event) -> tuple[int, int] | tuple[None, None]:
         """
@@ -383,9 +303,11 @@ class QTable(RLStrat):
 
     @abstractmethod
     def feature_rep(self, cell: Cell, *args, **kwargs):
+        """Feature representation of state"""
         raise NotImplementedError()
 
     def get_qvals(self, cell, n_used, chs, *args, **kwargs):
+        """Get Q-Values for the given cell and all the given channels"""
         frep = self.feature_rep(cell, n_used)
         return self.qvals[frep][chs]
 
