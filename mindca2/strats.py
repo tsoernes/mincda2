@@ -241,7 +241,6 @@ class RLStrat(Strat):
         """
         # (Number of) Channels in use at event cell
         inuse = np.nonzero(self.grid.state[event.cell])[0]
-        n_used = len(inuse)
 
         # Should also include HOFF in the first branch if implemented
         if isinstance(event, ArrivalEvent):
@@ -255,9 +254,8 @@ class RLStrat(Strat):
             # be the least valueable channel, in which case no
             # reassignment is done on call termination.
             chs = inuse
-            assert n_used > 0
 
-        qvals_dense = self.get_qvals(cell=event.cell, n_used=n_used, chs=chs)
+        qvals_dense = self.get_qvals(cell=event.cell, chs=chs)
         if isinstance(event, TerminationEvent):
             # Selecting a ch for reassigment is always greedy because no learning
             # is done on the reassignment actions.
@@ -282,7 +280,6 @@ class RLStrat(Strat):
     def get_qvals(
         self,
         cell: Cell,
-        n_used: int,
         chs: IntLike | npt.NDArray[np.int_],
         *args,
         **kwargs,
@@ -306,30 +303,32 @@ class QTable(RLStrat):
         """Feature representation of state"""
         raise NotImplementedError()
 
-    def get_qvals(self, cell, n_used, chs, *args, **kwargs):
+    def get_qvals(self, cell, chs, *args, **kwargs):
         """Get Q-Values for the given cell and all the given channels"""
-        frep = self.feature_rep(cell, n_used)
+        frep = self.feature_rep(cell)
         return self.qvals[frep][chs]
 
     def update_qval(
         self, gridarr:GridArr, cell: Cell, ch: int, next_cell: Cell, next_ch: int
     ):
-        assert type(ch) == np.int64
-        assert ch is not None
+        """Update Q-Value for the given staten and next action"""
         if self.sanity_check:
             assert np.sum(gridarr != self.grid.state) == 1
-        next_n_used = np.count_nonzero(self.grid.state[next_cell])
-        next_qval = self.get_qvals(next_cell, next_n_used, next_ch)
+        # The number of used channels in the cell of the next action
+        # Q-Value for the next state and action, i.e. Q(s_{t+1}, a{t+1})
+        next_qval = self.get_qvals(next_cell, next_ch)
+        # The reward is the number of calls in the progress, which is the sum
+        # of the allocation map
         reward = self.grid.state.sum()
+        # The target Q-value is an updated es
         target_q = reward + self.gamma * next_qval
-        n_used = np.count_nonzero(gridarr[cell])
-        q = self.get_qvals(cell=cell, n_used=n_used, chs=ch)
+        q = self.get_qvals(cell=cell, chs=ch)
         td_err = target_q - q
         self.losses.append(td_err**2)
-        frep = self.feature_rep(cell, n_used)
+        frep = self.feature_rep(cell)
         self.qvals[frep][ch] += self.alpha * td_err
         self.alpha *= self.alpha_decay
-        next_frep = self.feature_rep(next_cell, next_n_used)
+        next_frep = self.feature_rep(next_cell)
         self.logger.debug(
             f"Q[{frep}][{ch}]:{q:.1f} -> {reward:.1f} + Q[{next_frep}][{next_ch}]:{next_qval:.1f}"
         )
